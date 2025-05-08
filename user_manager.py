@@ -19,6 +19,8 @@ class UserManager:
     def __init__(self):
         self.console = Console()
         self.check_root_privileges()
+        self.sudoers_file = "/etc/sudoers"
+        self.sudoers_dir = "/etc/sudoers.d"
 
     def check_root_privileges(self):
         """检查是否具有root权限"""
@@ -261,6 +263,113 @@ class UserManager:
         else:
             self.console.print(f"[red]添加用户到组失败：{output}[/red]")
 
+    def check_sudo_access(self, username: str) -> bool:
+        """检查用户是否有sudo权限"""
+        try:
+            # 检查sudoers文件
+            cmd = f"grep -E '^{username}|^%.*{username}' {self.sudoers_file}"
+            success, output = self.run_command(["bash", "-c", cmd])
+            if success and output.strip():
+                return True
+
+            # 检查sudoers.d目录下的文件
+            cmd = f"grep -r -E '^{username}|^%.*{username}' {self.sudoers_dir}"
+            success, output = self.run_command(["bash", "-c", cmd])
+            if success and output.strip():
+                return True
+
+            return False
+        except:
+            return False
+
+    def list_sudo_users(self):
+        """列出所有具有sudo权限的用户"""
+        table = Table(title="Sudo权限用户列表")
+        table.add_column("用户名", style="cyan")
+        table.add_column("权限来源", style="green")
+        table.add_column("权限详情", style="yellow")
+
+        # 检查每个用户
+        for user in pwd.getpwall():
+            username = user.pw_name
+            if self.check_sudo_access(username):
+                # 查找权限来源
+                cmd = f"grep -r -E '^{username}|^%.*{username}' {self.sudoers_file} {self.sudoers_dir}"
+                success, output = self.run_command(["bash", "-c", cmd])
+                if success:
+                    for line in output.strip().split('\n'):
+                        if line:
+                            source, *content = line.split(':', 1)
+                            content = content[0] if content else "N/A"
+                            source = source.replace(self.sudoers_file, "sudoers")
+                            source = source.replace(self.sudoers_dir + '/', "sudoers.d/")
+                            table.add_row(username, source, content.strip())
+
+        self.console.print(table)
+
+    def grant_sudo_access(self):
+        """授予用户sudo权限"""
+        username = Prompt.ask("请输入要授予sudo权限的用户名")
+        
+        try:
+            pwd.getpwnam(username)
+        except KeyError:
+            self.console.print(f"[red]错误：用户 {username} 不存在！[/red]")
+            return
+
+        if self.check_sudo_access(username):
+            self.console.print(f"[yellow]用户 {username} 已经具有sudo权限[/yellow]")
+            return
+
+        # 创建新的sudoers文件
+        filename = f"{self.sudoers_dir}/{username}"
+        content = f"{username} ALL=(ALL) ALL"
+        
+        try:
+            # 首先写入临时文件
+            temp_file = f"{filename}.tmp"
+            with open(temp_file, 'w') as f:
+                f.write(content + '\n')
+            
+            # 检查语法
+            success, output = self.run_command(["visudo", "-c", "-f", temp_file])
+            if not success:
+                self.console.print(f"[red]错误：sudoers语法检查失败：{output}[/red]")
+                os.unlink(temp_file)
+                return
+
+            # 移动到最终位置
+            os.rename(temp_file, filename)
+            os.chmod(filename, 0o440)
+            self.console.print(f"[green]成功授予用户 {username} sudo权限[/green]")
+        except Exception as e:
+            self.console.print(f"[red]授予sudo权限失败：{str(e)}[/red]")
+
+    def revoke_sudo_access(self):
+        """撤销用户的sudo权限"""
+        username = Prompt.ask("请输入要撤销sudo权限的用户名")
+        
+        try:
+            pwd.getpwnam(username)
+        except KeyError:
+            self.console.print(f"[red]错误：用户 {username} 不存在！[/red]")
+            return
+
+        if not self.check_sudo_access(username):
+            self.console.print(f"[yellow]用户 {username} 没有sudo权限[/yellow]")
+            return
+
+        # 查找并删除sudoers配置
+        filename = f"{self.sudoers_dir}/{username}"
+        if os.path.exists(filename):
+            try:
+                os.unlink(filename)
+                self.console.print(f"[green]成功撤销用户 {username} 的sudo权限[/green]")
+            except Exception as e:
+                self.console.print(f"[red]撤销sudo权限失败：{str(e)}[/red]")
+        else:
+            self.console.print(f"[yellow]警告：需要手动编辑 {self.sudoers_file} 来撤销权限[/yellow]")
+
 def main_menu():
     """显示主菜单"""
     manager = UserManager()
@@ -279,11 +388,14 @@ def main_menu():
                 "7. 创建新用户组\n"
                 "8. 删除用户组\n"
                 "9. 将用户添加到组\n"
+                "10. 列出所有具有sudo权限的用户\n"
+                "11. 授予用户sudo权限\n"
+                "12. 撤销用户的sudo权限\n"
                 "0. 退出程序",
                 title="主菜单"
             ))
 
-            choice = Prompt.ask("请选择操作", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"])
+            choice = Prompt.ask("请选择操作", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"])
 
             if choice == "0":
                 console.print("[yellow]感谢使用，再见！[/yellow]")
@@ -308,6 +420,12 @@ def main_menu():
                     manager.delete_group()
                 elif choice == "9":
                     manager.add_user_to_group()
+                elif choice == "10":
+                    manager.list_sudo_users()
+                elif choice == "11":
+                    manager.grant_sudo_access()
+                elif choice == "12":
+                    manager.revoke_sudo_access()
 
                 Prompt.ask("\n按回车键继续...")
 
